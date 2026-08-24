@@ -237,26 +237,11 @@ struct ContentView: View {
                             }
                             .width(min: 220, ideal: 280, max: 350)
                             
-                            TableColumn("Version", value: \.version) { package in
+                            TableColumn("Version") { package in
                                 HStack(spacing: 4) {
                                     Text(package.version)
                                         .font(.system(.body, design: .monospaced))
                                         .foregroundStyle(.primary)
-                                }
-                            }
-                            .width(min: 120, ideal: 150, max: 180)
-                            
-                            TableColumn("Active Version") { package in
-                                HStack(spacing: 6) {
-                                    if let active = package.activeVersion, compareVersions(package.version, active) == .orderedAscending {
-                                        Text(active)
-                                            .font(.caption.monospaced())
-                                            .foregroundStyle(.green)
-                                    } else {
-                                        Text("—")
-                                            .font(.caption.monospaced())
-                                            .foregroundStyle(.secondary)
-                                    }
                                 }
                             }
                             .width(min: 120, ideal: 150, max: 180)
@@ -272,7 +257,7 @@ struct ContentView: View {
                                     }
                                 }
                             }
-                            .width(min: 150, ideal: 180, max: 200)
+                            .width(min: 200, ideal: 250, max: 300)
                             
                             TableColumn("Category", value: \.description) { package in
                                 Text(package.description)
