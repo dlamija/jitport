@@ -10,8 +10,9 @@ struct ContentView: View {
     @State private var selectedCategory: Category = .installed
     @State private var packages: [MacPortPackage] = []
     @State private var sortOrder = [KeyPathComparator(\MacPortPackage.name)]
-    @State private var selection = Set<MacPortPackage.ID>()
+    @State private var selection = Set<String>()
     @State private var upgradeSelection = Set<MacPortPackage.ID>()
+    @State private var uninstallSelection = Set<String>()
     @State private var isLoading = false
     @State private var lastRefresh: Date?
     @State private var errorMessage: String?
@@ -217,7 +218,7 @@ struct ContentView: View {
                         .frame(minHeight: 300, maxHeight: .infinity)
                         .layoutPriority(1)
                     } else if selectedCategory == .inactive {
-                        InactiveTable(filteredPackages: filteredPackages, selection: $selection, sortOrder: $sortOrder, compareVersions: compareVersions)
+                        InactiveTable(filteredPackages: filteredPackages, selection: $selection, uninstallSelection: $uninstallSelection, compareVersions: compareVersions)
                             .frame(minHeight: 300, maxHeight: .infinity)
                             .layoutPriority(1)
                     } else {
@@ -749,47 +750,61 @@ struct MacPortPackage: Identifiable, Equatable, Codable {
 
 struct InactiveTable: View {
     let filteredPackages: [MacPortPackage]
-    @Binding var selection: Set<MacPortPackage.ID>
-    @Binding var sortOrder: [KeyPathComparator<MacPortPackage>]
+    @Binding var selection: Set<String>
+    @Binding var uninstallSelection: Set<String>
     let compareVersions: (String, String) -> ComparisonResult
     
+    // Define an Identifiable row
+    struct InactiveRow: Identifiable {
+        let id: String // Unique ID for this row: name-version
+        let pkg: MacPortPackage
+        let inactiveVersion: String
+    }
+    
     var body: some View {
-        Table(filteredPackages, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("Name", value: \.name) { package in
-                HStack(spacing: 8) {
-                    Image(systemName: package.status.icon)
-                        .foregroundStyle(package.status.color)
-                        .frame(width: 16)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(package.name)
-                            .lineLimit(1)
-                            .font(.system(.body, design: .monospaced))
-                        if let variant = package.variant, !variant.isEmpty {
-                            Text(variant)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+        let inactiveRows = filteredPackages.flatMap { pkg in
+            pkg.inactiveVersions.map { InactiveRow(id: "\(pkg.name)-\($0)", pkg: pkg, inactiveVersion: $0) }
+        }
+        
+        Table(inactiveRows, selection: $selection) {
+            TableColumn("Uninstall") { row in
+                Toggle("", isOn: Binding(
+                    get: { uninstallSelection.contains(row.id) },
+                    set: { isSelected in
+                        if isSelected {
+                            uninstallSelection.insert(row.id)
+                        } else {
+                            uninstallSelection.remove(row.id)
                         }
                     }
+                ))
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                // Only allow uninstalling if an active version exists
+                .disabled(row.pkg.activeVersion == nil)
+            }
+            .width(min: 70, ideal: 70, max: 70)
+            
+            TableColumn("Name") { row in
+                HStack(spacing: 8) {
+                    Image(systemName: row.pkg.status.icon)
+                        .foregroundStyle(row.pkg.status.color)
+                        .frame(width: 16)
+                    Text(row.pkg.name)
+                        .font(.system(.body, design: .monospaced))
                 }
             }
             .width(min: 220, ideal: 280, max: 350)
             
-            // Render a row for EACH inactive version.
-            // We use a helper to expand the packages into version rows.
-            TableColumn("Version") { package in
-                // This column should show the inactive version(s).
-                // If there are multiple inactive versions, we'd need to flatten the table structure.
-                // Given the constraint of Table(filteredPackages...), this is tricky.
-                Text(package.inactiveVersions.isEmpty ? package.version : package.inactiveVersions.joined(separator: ", "))
+            TableColumn("Version") { row in
+                Text(row.inactiveVersion)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.primary)
             }
             .width(min: 120, ideal: 150, max: 180)
             
-            TableColumn("Active Version") { package in
+            TableColumn("Active Version") { row in
                 HStack(spacing: 6) {
-                    if let active = package.activeVersion, !package.inactiveVersions.isEmpty,
-                       package.inactiveVersions.contains(where: { compareVersions($0, active) == .orderedAscending }) {
+                    if let active = row.pkg.activeVersion, compareVersions(row.inactiveVersion, active) == .orderedAscending {
                         Text(active)
                             .font(.caption.monospaced())
                             .foregroundStyle(.green)
@@ -802,8 +817,8 @@ struct InactiveTable: View {
             }
             .width(min: 100, ideal: 130, max: 160)
             
-            TableColumn("Category", value: \.description) { package in
-                Text(package.description)
+            TableColumn("Category") { row in
+                Text(row.pkg.description)
                     .font(.body)
                     .foregroundStyle(.primary)
                     .lineLimit(2)
