@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var selectedCategory: Category = .installed
+    @State private var selectedCategory: Category = .all
     @State private var packages: [MacPortPackage] = []
     @State private var sortOrder = [KeyPathComparator(\MacPortPackage.name)]
     @State private var selection = Set<MacPortPackage.ID>()
@@ -19,6 +19,8 @@ struct ContentView: View {
     
     var filteredPackages: [MacPortPackage] {
         switch selectedCategory {
+        case .all:
+            return packages
         case .installed:
             return packages.filter { $0.isInstalled }
         case .requested:
@@ -32,6 +34,7 @@ struct ContentView: View {
     
     var categoryCounts: [Category: Int] {
         [
+            .all: packages.count,
             .installed: packages.filter { $0.isInstalled }.count,
             .requested: packages.filter { $0.statuses.contains(.requested) }.count,
             .outdated: packages.filter { $0.statuses.contains(.outdated) }.count,
@@ -566,6 +569,7 @@ struct ContentView: View {
 // MARK: - Models
 
 enum Category: String, CaseIterable, Identifiable {
+    case all = "All"
     case installed = "Installed"
     case requested = "Requested"
     case outdated = "Outdated"
@@ -575,6 +579,7 @@ enum Category: String, CaseIterable, Identifiable {
     
     var icon: String {
         switch self {
+        case .all: return "list.bullet"
         case .installed: return "shippingbox.fill"
         case .requested: return "arrow.down.circle.fill"
         case .outdated: return "exclamationmark.triangle.fill"
