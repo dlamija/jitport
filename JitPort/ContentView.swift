@@ -15,7 +15,6 @@ struct ContentView: View {
     @State private var isLoading = false
     @State private var lastRefresh: Date?
     @State private var errorMessage: String?
-    @State private var hasSynced = false
     
     var filteredPackages: [MacPortPackage] {
         switch selectedCategory {
@@ -298,7 +297,7 @@ struct ContentView: View {
                 }
             }
             .task {
-                await refreshPackages(sync: !hasSynced)
+                await refreshPackages(sync: false)
             }
         }
     }
@@ -316,7 +315,6 @@ struct ContentView: View {
             if sync {
                 print("Syncing MacPorts database...")
                 _ = try await runRootCommandAsync("/opt/local/bin/port -s sync")
-                hasSynced = true
             }
             
             // Fetch all data in parallel
