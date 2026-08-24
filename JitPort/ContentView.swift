@@ -237,30 +237,33 @@ struct ContentView: View {
                             }
                             .width(min: 220, ideal: 280, max: 350)
                             
-                            TableColumn("Version") { package in
+                            TableColumn("Active Version") { package in
                                 HStack(spacing: 4) {
-                                    // In Inactive list, version refers to the inactive version being shown
-                                    Text(package.version)
-                                        .font(.system(.body, design: .monospaced))
-                                        .foregroundStyle(.primary)
-                                }
-                            }
-                            .width(min: 120, ideal: 150, max: 180)
-                            
-                            TableColumn("Active") { package in
-                                HStack(spacing: 6) {
                                     if let active = package.activeVersion {
                                         Text(active)
-                                            .font(.caption.monospaced())
-                                            .foregroundStyle(compareVersions(package.version, active) == .orderedAscending ? .green : .secondary)
+                                            .font(.system(.body, design: .monospaced))
+                                            .foregroundStyle(.primary)
                                     } else {
                                         Text("—")
-                                            .font(.caption.monospaced())
+                                            .font(.system(.body, design: .monospaced))
                                             .foregroundStyle(.secondary)
                                     }
                                 }
                             }
-                            .width(min: 100, ideal: 130, max: 160)
+                            .width(min: 120, ideal: 150, max: 180)
+                            
+                            TableColumn("Inactive Version(s)") { package in
+                                HStack(spacing: 6) {
+                                    if !package.inactiveVersions.isEmpty {
+                                        Text(package.inactiveVersions.joined(separator: ", "))
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text("—")
+                                    }
+                                }
+                            }
+                            .width(min: 150, ideal: 180, max: 200)
                             
                             TableColumn("Category", value: \.description) { package in
                                 Text(package.description)
@@ -414,58 +417,66 @@ struct ContentView: View {
             
             var newPackages: [MacPortPackage] = []
             
-            // Get all installed package names
-            let allInstalledNames = Set(installedDict.keys)
-            
-            // We need to fetch versions for all inactive packages individually
-            let inactivePackagesData = try await withTaskGroup(of: (String, String?, [String]).self) { group in
-                for name in inactiveNames {
-                    group.addTask {
-                        let versions = await self.fetchPackageVersions(for: name)
-                        return (name, versions.active, versions.inactive)
-                    }
-                }
-                
-                var map: [String: (String?, [String])] = [:]
-                for await (name, active, inactive) in group {
-                    map[name] = (active, inactive)
-                }
-                return map
-            }
-            
-            // Consolidate package data
-            for name in allInstalledNames {
+            // Add installed packages
+            for (name, info) in installedDict {
                 var statuses = Set<PackageStatus>()
                 statuses.insert(.installed)
+                
                 if requestedNames.contains(name) { statuses.insert(.requested) }
                 if inactiveNames.contains(name) { statuses.insert(.inactive) }
                 if outdatedDict[name] != nil { statuses.insert(.outdated) }
-                
-                let isInactive = inactiveNames.contains(name)
-                let versions = inactivePackagesData[name] ?? (nil, [])
-                
-                // For solely inactive packages, use the inactive list
-                let inactiveVersions = isInactive ? versions.1 : []
                 
                 let latestVersion = outdatedDict[name]
                 
                 let category = inactiveNames.contains(name) ? inactiveDict[name]?.description : nil
                 
-                // If inactive, create separate MacPortPackage entries for each inactive version?
-                // For now, let's keep one entry per package and show all inactive versions
-                
                 newPackages.append(MacPortPackage(
                     name: name,
-                    version: installedDict[name]?.0 ?? "unknown", // Currently active version from installedDict
-                    activeVersion: versions.0,
-                    inactiveVersions: inactiveVersions,
+                    version: info.version,
+                    activeVersion: info.active,
+                    inactiveVersions: [], // Will be populated for inactive
                     latestVersion: latestVersion,
-                    variant: installedDict[name]?.1,
+                    variant: info.variant,
                     statuses: statuses,
                     description: category ?? "Installed via MacPorts",
                     category: category,
                     isInstalled: true
                 ))
+            }
+            
+            // Specifically fetch active versions for inactive packages as requested
+            let inactivePackages = newPackages.filter { $0.statuses.contains(.inactive) }
+            
+            await withTaskGroup(of: (String, (String?, [String])).self) { group in
+                for pkg in inactivePackages {
+                    group.addTask {
+                        let versions = await self.fetchPackageVersions(for: pkg.name)
+                        return (pkg.name, versions)
+                    }
+                }
+                
+                var versionsMap: [String: (String?, [String])] = [:]
+                for await (name, versions) in group {
+                    versionsMap[name] = versions
+                }
+                
+                // Update newPackages with active/inactive versions
+                for i in 0..<newPackages.count {
+                    if let versions = versionsMap[newPackages[i].name] {
+                        newPackages[i] = MacPortPackage(
+                            name: newPackages[i].name,
+                            version: newPackages[i].version,
+                            activeVersion: versions.0,
+                            inactiveVersions: versions.1,
+                            latestVersion: newPackages[i].latestVersion,
+                            variant: newPackages[i].variant,
+                            statuses: newPackages[i].statuses,
+                            description: newPackages[i].description,
+                            category: newPackages[i].category,
+                            isInstalled: newPackages[i].isInstalled
+                        )
+                    }
+                }
             }
             
             packages = newPackages.sorted { $0.name < $1.name }
@@ -486,18 +497,21 @@ struct ContentView: View {
             
             for line in output.components(separatedBy: .newlines) {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.isEmpty || trimmed.hasPrefix("The following") { continue }
+                if trimmed.isEmpty || !trimmed.contains("@") || trimmed.hasPrefix("The following") { continue }
                 
-                let pattern = #/\s*(\S+)\s+@(\S+)(?:\s+\((\w+)\))?(?:\s+\[([^\]]+)\])?/#
-                if let match = trimmed.firstMatch(of: pattern) {
-                    let version = String(match.output.2)
-                    let activeState = match.output.3.map(String.init) ?? "inactive"
-                    
-                    if activeState == "active" {
-                        active = version
-                    } else {
-                        inactive.append(version)
-                    }
+                // Format: name @version ...
+                let parts = trimmed.components(separatedBy: "@")
+                if parts.count < 2 { continue }
+                
+                let versionPart = parts[1].trimmingCharacters(in: .whitespaces)
+                let components = versionPart.components(separatedBy: .whitespaces)
+                
+                let version = components[0]
+                
+                if versionPart.contains("(active)") {
+                    active = version
+                } else {
+                    inactive.append(version)
                 }
             }
             return (active, inactive)
