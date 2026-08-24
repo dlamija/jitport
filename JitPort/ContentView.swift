@@ -201,6 +201,69 @@ struct ContentView: View {
                         }
                         .frame(minHeight: 300, maxHeight: .infinity)
                         .layoutPriority(1)
+                    } else if selectedCategory == .inactive {
+                        Table(filteredPackages, selection: $selection, sortOrder: $sortOrder) {
+                            TableColumn("Name", value: \.name) { package in
+                                HStack(spacing: 8) {
+                                    Image(systemName: package.status.icon)
+                                        .foregroundStyle(package.status.color)
+                                        .frame(width: 16)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(package.name)
+                                            .lineLimit(1)
+                                            .font(.system(.body, design: .monospaced))
+                                        if let variant = package.variant, !variant.isEmpty {
+                                            Text(variant)
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                }
+                            }
+                            .width(min: 220, ideal: 280, max: 350)
+                            
+                            TableColumn("Version", value: \.version) { package in
+                                HStack(spacing: 4) {
+                                    Text(package.version)
+                                        .font(.system(.body, design: .monospaced))
+                                        .foregroundStyle(.primary)
+                                }
+                            }
+                            .width(min: 120, ideal: 150, max: 180)
+                            
+                            TableColumn("Active") { package in
+                                HStack(spacing: 6) {
+                                    if let active = package.activeVersion, package.version < active {
+                                        Text(active)
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.green)
+                                    } else {
+                                        Text("—")
+                                    }
+                                }
+                            }
+                            .width(min: 100, ideal: 130, max: 160)
+                            
+                            TableColumn("Category", value: \.description) { package in
+                                Text(package.description)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                            }
+                            .width(min: 200, ideal: 300, max: 500)
+                        }
+                        .tableStyle(.inset(alternatesRowBackgrounds: true))
+                        .overlay {
+                            if packages.isEmpty && !isLoading {
+                                ContentUnavailableView(
+                                    "No Packages",
+                                    systemImage: "shippingbox",
+                                    description: Text("Click Refresh to load packages from MacPorts")
+                                )
+                            }
+                        }
+                        .frame(minHeight: 300, maxHeight: .infinity)
+                        .layoutPriority(1)
                     } else {
                         Table(filteredPackages, selection: $selection, sortOrder: $sortOrder) {
                             TableColumn("Name", value: \.name) { package in
@@ -314,52 +377,64 @@ struct ContentView: View {
                 _ = try await runRootCommandAsync("/opt/local/bin/port -s sync")
             }
             
-            // Fetch installed packages (active + inactive)
-            let installed = try await runPortCommand("installed")
-            let installedDict = parseInstalled(installed)
+            // Fetch all data in parallel
+            async let installedTask = runPortCommand("installed")
+            async let allTask = runPortCommand("list")
+            async let requestedTask = runPortCommand("installed", "requested")
+            async let inactiveTask = runPortCommand("list", "inactive")
+            async let outdatedTask = runPortCommand("outdated")
             
-            // Fetch requested packages (explicitly requested by user)
-            let requested = try await runPortCommand("installed", "requested")
-            let requestedNames = Set(self.parseInstalled(requested).keys)
+            let (installed, all, requested, inactive, outdated) = try await (installedTask, allTask, requestedTask, inactiveTask, outdatedTask)
             
-            // Fetch inactive packages to get their category info AND determine inactive status
-            let inactive = try await runPortCommand("list", "inactive")
-            let inactiveDict = parseList(inactive)
-            let inactiveNames = Set(inactiveDict.keys)
-            
-            // Fetch outdated packages
-            let outdated = try await runPortCommand("outdated")
-            let outdatedDict = parseOutdated(outdated)
-            
-            var newPackages: [MacPortPackage] = []
-            
-            // Add all installed packages
-            for (name, info) in installedDict {
-                var statuses = Set<PackageStatus>()
-                statuses.insert(.installed)
+            // Offload parsing to background
+            let newPackages = try await Task.detached(priority: .userInitiated) {
+                let installedDict = self.parseInstalled(installed)
+                let allDict = self.parseList(all)
+                let requestedNames = Set(self.parseInstalled(requested).keys)
+                let inactiveDict = self.parseList(inactive)
+                let inactiveNames = Set(inactiveDict.keys)
+                let outdatedDict = self.parseOutdated(outdated)
                 
-                if requestedNames.contains(name) { statuses.insert(.requested) }
-                if inactiveNames.contains(name) { statuses.insert(.inactive) }
-                if outdatedDict[name] != nil { statuses.insert(.outdated) }
+                var packages: [MacPortPackage] = []
                 
-                let latestVersion = outdatedDict[name]
-                
-                let category = inactiveNames.contains(name) ? inactiveDict[name]?.description : nil
-                
-                newPackages.append(MacPortPackage(
-                    name: name,
-                    version: info.version,
-                    latestVersion: latestVersion,
-                    variant: info.variant,
-                    statuses: statuses,
-                    description: category ?? info.description ?? "Package in MacPorts",
-                    category: category,
-                    isInstalled: true
-                ))
+                for (name, info) in allDict {
+                    var statuses = Set<PackageStatus>()
+                    
+                    var activeVersion: String?
+                    if let installedInfo = installedDict[name] {
+                        statuses.insert(.installed)
+                        activeVersion = installedInfo.active
+                        if requestedNames.contains(name) { statuses.insert(.requested) }
+                        if inactiveNames.contains(name) { statuses.insert(.inactive) }
+                        if outdatedDict[name] != nil { statuses.insert(.outdated) }
+                    } else {
+                        statuses.insert(.available)
+                    }
+                    
+                    let latestVersion = outdatedDict[name]
+                    let isInstalled = installedDict[name] != nil
+                    
+                    let category = inactiveNames.contains(name) ? inactiveDict[name]?.description : nil
+                    
+                    packages.append(MacPortPackage(
+                        name: name,
+                        version: info.version,
+                        activeVersion: activeVersion,
+                        latestVersion: latestVersion,
+                        variant: isInstalled ? installedDict[name]?.variant : nil,
+                        statuses: statuses,
+                        description: category ?? info.description ?? "Package in MacPorts",
+                        category: category,
+                        isInstalled: isInstalled
+                    ))
+                }
+                return packages.sorted { $0.name < $1.name }
+            }.value
+            
+            await MainActor.run {
+                self.packages = newPackages
+                self.lastRefresh = Date()
             }
-            
-            packages = newPackages.sorted { $0.name < $1.name }
-            lastRefresh = Date()
         } catch {
             print("Error refreshing packages: \(error)")
             errorMessage = error.localizedDescription
@@ -406,6 +481,7 @@ struct ContentView: View {
                 packages[index] = MacPortPackage(
                     name: package.name,
                     version: package.version,
+                    activeVersion: package.activeVersion,
                     latestVersion: package.latestVersion,
                     variant: package.variant,
                     statuses: package.statuses,
@@ -477,22 +553,26 @@ struct ContentView: View {
         }.value
     }
     
-    private func parseInstalled(_ output: String) -> [String: (version: String, variant: String?, isActive: Bool, description: String?)] {
-        var dict: [String: (String, String?, Bool, String?)] = [:]
+    private func parseInstalled(_ output: String) -> [String: (version: String, variant: String?, active: String?, description: String?)] {
+        var dict: [String: (String, String?, String?, String?)] = [:]
         
         for line in output.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, !trimmed.hasPrefix("The following") else { continue }
             
-            // Format: name @version (active/inactive) [variant]
-            // inactive packages have no (active) marker
             let pattern = #/^\s*(\S+)\s+@(\S+)(?:\s+\((\w+)\))?(?:\s+\[([^\]]+)\])?/# 
             if let match = trimmed.firstMatch(of: pattern) {
                 let name = String(match.output.1)
                 let version = String(match.output.2)
                 let activeState = match.output.3.map(String.init) ?? "inactive"
                 let variant = match.output.4.map(String.init)
-                dict[name] = (version, variant, activeState == "active", nil)
+                
+                let existing = dict[name]
+                if activeState == "active" {
+                    dict[name] = (version, variant, version, nil)
+                } else {
+                    dict[name] = (existing?.0 ?? version, existing?.1 ?? variant, existing?.2, nil)
+                }
             }
         }
         return dict
@@ -503,7 +583,6 @@ struct ContentView: View {
         for line in output.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, !trimmed.hasPrefix("The following") else { continue }
-            // Format: name @installed_version < @latest_version
             let components = trimmed.components(separatedBy: .whitespaces)
             if let index = components.firstIndex(of: "<") {
                 let name = components[0]
@@ -523,13 +602,10 @@ struct ContentView: View {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, !trimmed.hasPrefix("Warning:") else { continue }
             
-            // Format: name @version path
-            // Updated to handle variable whitespace
             let pattern = #/^\s*(\S+)\s+@(\S+)\s+(.+)$/# 
             if let match = trimmed.firstMatch(of: pattern) {
                 let name = String(match.output.1)
                 let version = String(match.output.2)
-                // No description in port list output, but we have the path/category
                 let category = String(match.output.3)
                 dict[name] = (version, category)
             }
@@ -539,14 +615,14 @@ struct ContentView: View {
     
     private func loadSampleData() {
         packages = [
-            MacPortPackage(name: "git", version: "2.43.0", latestVersion: nil, variant: "+svn+credential_osxkeychain", statuses: [.installed], description: "Distributed version control system", category: "devel/git", isInstalled: true),
-            MacPortPackage(name: "nodejs20", version: "20.10.0", latestVersion: "20.11.0", variant: nil, statuses: [.installed, .outdated], description: "JavaScript runtime built on Chrome's V8 engine", category: "lang/nodejs20", isInstalled: true),
-            MacPortPackage(name: "python312", version: "3.12.0", latestVersion: nil, variant: "+readline+sqlite3", statuses: [.installed], description: "Interpreted, high-level programming language", category: "lang/python312", isInstalled: true),
-            MacPortPackage(name: "swiftlint", version: "0.54.0", latestVersion: nil, variant: nil, statuses: [.requested], description: "A tool to enforce Swift style and conventions", category: "devel/swiftlint", isInstalled: false),
-            MacPortPackage(name: "swiftformat", version: "0.53.6", latestVersion: nil, variant: nil, statuses: [.requested], description: "A code library for formatting Swift code", category: "devel/swiftformat", isInstalled: false),
-            MacPortPackage(name: "xcodes", version: "1.4.0", latestVersion: nil, variant: nil, statuses: [.requested], description: "Install and switch between multiple versions of Xcode", category: "devel/xcodes", isInstalled: false),
-            MacPortPackage(name: "cocoapods", version: "1.13.0", latestVersion: "1.14.0", variant: nil, statuses: [.installed, .outdated], description: "Dependency manager for Swift and Objective-C Cocoa projects", category: "devel/cocoapods", isInstalled: true),
-            MacPortPackage(name: "alcatraz", version: "1.2.3", latestVersion: nil, variant: nil, statuses: [.installed, .inactive], description: "Package manager for Xcode (deprecated)", category: "devel/alcatraz", isInstalled: true),
+            MacPortPackage(name: "git", version: "2.43.0", activeVersion: "2.43.0", latestVersion: nil, variant: "+svn+credential_osxkeychain", statuses: [.installed], description: "Distributed version control system", category: "devel/git", isInstalled: true),
+            MacPortPackage(name: "nodejs20", version: "20.10.0", activeVersion: "20.10.0", latestVersion: "20.11.0", variant: nil, statuses: [.installed, .outdated], description: "JavaScript runtime built on Chrome's V8 engine", category: "lang/nodejs20", isInstalled: true),
+            MacPortPackage(name: "python312", version: "3.12.0", activeVersion: "3.12.0", latestVersion: nil, variant: "+readline+sqlite3", statuses: [.installed], description: "Interpreted, high-level programming language", category: "lang/python312", isInstalled: true),
+            MacPortPackage(name: "swiftlint", version: "0.54.0", activeVersion: nil, latestVersion: nil, variant: nil, statuses: [.requested], description: "A tool to enforce Swift style and conventions", category: "devel/swiftlint", isInstalled: false),
+            MacPortPackage(name: "swiftformat", version: "0.53.6", activeVersion: nil, latestVersion: nil, variant: nil, statuses: [.requested], description: "A code library for formatting Swift code", category: "devel/swiftformat", isInstalled: false),
+            MacPortPackage(name: "xcodes", version: "1.4.0", activeVersion: nil, latestVersion: nil, variant: nil, statuses: [.requested], description: "Install and switch between multiple versions of Xcode", category: "devel/xcodes", isInstalled: false),
+            MacPortPackage(name: "cocoapods", version: "1.13.0", activeVersion: "1.13.0", latestVersion: "1.14.0", variant: nil, statuses: [.installed, .outdated], description: "Dependency manager for Swift and Objective-C Cocoa projects", category: "devel/cocoapods", isInstalled: true),
+            MacPortPackage(name: "alcatraz", version: "1.2.3", activeVersion: nil, latestVersion: nil, variant: nil, statuses: [.installed, .inactive], description: "Package manager for Xcode (deprecated)", category: "devel/alcatraz", isInstalled: true),
         ]
         lastRefresh = Date()
     }
@@ -577,6 +653,7 @@ enum PackageStatus: String, CaseIterable {
     case outdated = "Outdated"
     case inactive = "Inactive"
     case installed = "Installed"
+    case available = "Available"
     case updating = "Updating"
     
     var icon: String {
@@ -585,6 +662,7 @@ enum PackageStatus: String, CaseIterable {
         case .outdated: return "exclamationmark.triangle"
         case .inactive: return "archivebox"
         case .installed: return "checkmark.circle.fill"
+        case .available: return "plus.circle"
         case .updating: return "arrow.clockwise"
         }
     }
@@ -595,6 +673,7 @@ enum PackageStatus: String, CaseIterable {
         case .outdated: return .orange
         case .inactive: return .gray
         case .installed: return .green
+        case .available: return .secondary
         case .updating: return .purple
         }
     }
@@ -604,6 +683,7 @@ struct MacPortPackage: Identifiable, Equatable {
     var id: String { name }
     let name: String
     let version: String
+    let activeVersion: String?
     let latestVersion: String?
     let variant: String?
     let statuses: Set<PackageStatus>
@@ -615,7 +695,8 @@ struct MacPortPackage: Identifiable, Equatable {
         if statuses.contains(.outdated) { return .outdated }
         if statuses.contains(.requested) { return .requested }
         if statuses.contains(.inactive) { return .inactive }
-        return .installed
+        if statuses.contains(.installed) { return .installed }
+        return .available
     }
 }
 
