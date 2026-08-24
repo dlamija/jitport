@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var selectedCategory: Category = .all
+    @State private var selectedCategory: Category = .installed
     @State private var packages: [MacPortPackage] = []
     @State private var sortOrder = [KeyPathComparator(\MacPortPackage.name)]
     @State private var selection = Set<MacPortPackage.ID>()
@@ -18,8 +18,6 @@ struct ContentView: View {
     
     var filteredPackages: [MacPortPackage] {
         switch selectedCategory {
-        case .all:
-            return packages
         case .installed:
             return packages.filter { $0.isInstalled }
         case .requested:
@@ -33,7 +31,6 @@ struct ContentView: View {
     
     var categoryCounts: [Category: Int] {
         [
-            .all: packages.count,
             .installed: packages.filter { $0.isInstalled }.count,
             .requested: packages.filter { $0.statuses.contains(.requested) }.count,
             .outdated: packages.filter { $0.statuses.contains(.outdated) }.count,
@@ -317,61 +314,52 @@ struct ContentView: View {
                 _ = try await runRootCommandAsync("/opt/local/bin/port -s sync")
             }
             
-            // Fetch all data in parallel
-            async let installedTask = runPortCommand("installed")
-            async let allTask = runPortCommand("list")
-            async let requestedTask = runPortCommand("installed", "requested")
-            async let inactiveTask = runPortCommand("list", "inactive")
-            async let outdatedTask = runPortCommand("outdated")
+            // Fetch installed packages (active + inactive)
+            let installed = try await runPortCommand("installed")
+            let installedDict = parseInstalled(installed)
             
-            let (installed, all, requested, inactive, outdated) = try await (installedTask, allTask, requestedTask, inactiveTask, outdatedTask)
+            // Fetch requested packages (explicitly requested by user)
+            let requested = try await runPortCommand("installed", "requested")
+            let requestedNames = Set(self.parseInstalled(requested).keys)
             
-            // Offload parsing to background
-            let newPackages = try await Task.detached(priority: .userInitiated) {
-                let installedDict = self.parseInstalled(installed)
-                let allDict = self.parseList(all)
-                let requestedNames = Set(self.parseInstalled(requested).keys)
-                let inactiveDict = self.parseList(inactive)
-                let inactiveNames = Set(inactiveDict.keys)
-                let outdatedDict = self.parseOutdated(outdated)
+            // Fetch inactive packages to get their category info AND determine inactive status
+            let inactive = try await runPortCommand("list", "inactive")
+            let inactiveDict = parseList(inactive)
+            let inactiveNames = Set(inactiveDict.keys)
+            
+            // Fetch outdated packages
+            let outdated = try await runPortCommand("outdated")
+            let outdatedDict = parseOutdated(outdated)
+            
+            var newPackages: [MacPortPackage] = []
+            
+            // Add all installed packages
+            for (name, info) in installedDict {
+                var statuses = Set<PackageStatus>()
+                statuses.insert(.installed)
                 
-                var packages: [MacPortPackage] = []
+                if requestedNames.contains(name) { statuses.insert(.requested) }
+                if inactiveNames.contains(name) { statuses.insert(.inactive) }
+                if outdatedDict[name] != nil { statuses.insert(.outdated) }
                 
-                for (name, info) in allDict {
-                    var statuses = Set<PackageStatus>()
-                    
-                    if let installedInfo = installedDict[name] {
-                        statuses.insert(.installed)
-                        if requestedNames.contains(name) { statuses.insert(.requested) }
-                        if inactiveNames.contains(name) { statuses.insert(.inactive) }
-                        if outdatedDict[name] != nil { statuses.insert(.outdated) }
-                    } else {
-                        statuses.insert(.available)
-                    }
-                    
-                    let latestVersion = outdatedDict[name]
-                    let isInstalled = installedDict[name] != nil
-                    
-                    let category = inactiveNames.contains(name) ? inactiveDict[name]?.description : nil
-                    
-                    packages.append(MacPortPackage(
-                        name: name,
-                        version: info.version,
-                        latestVersion: latestVersion,
-                        variant: isInstalled ? installedDict[name]?.variant : nil,
-                        statuses: statuses,
-                        description: category ?? info.description ?? "Package in MacPorts",
-                        category: category,
-                        isInstalled: isInstalled
-                    ))
-                }
-                return packages.sorted { $0.name < $1.name }
-            }.value
-            
-            await MainActor.run {
-                self.packages = newPackages
-                self.lastRefresh = Date()
+                let latestVersion = outdatedDict[name]
+                
+                let category = inactiveNames.contains(name) ? inactiveDict[name]?.description : nil
+                
+                newPackages.append(MacPortPackage(
+                    name: name,
+                    version: info.version,
+                    latestVersion: latestVersion,
+                    variant: info.variant,
+                    statuses: statuses,
+                    description: category ?? info.description ?? "Package in MacPorts",
+                    category: category,
+                    isInstalled: true
+                ))
             }
+            
+            packages = newPackages.sorted { $0.name < $1.name }
+            lastRefresh = Date()
         } catch {
             print("Error refreshing packages: \(error)")
             errorMessage = error.localizedDescription
@@ -567,7 +555,6 @@ struct ContentView: View {
 // MARK: - Models
 
 enum Category: String, CaseIterable, Identifiable {
-    case all = "All"
     case installed = "Installed"
     case requested = "Requested"
     case outdated = "Outdated"
@@ -577,7 +564,6 @@ enum Category: String, CaseIterable, Identifiable {
     
     var icon: String {
         switch self {
-        case .all: return "list.bullet"
         case .installed: return "shippingbox.fill"
         case .requested: return "arrow.down.circle.fill"
         case .outdated: return "exclamationmark.triangle.fill"
@@ -591,7 +577,6 @@ enum PackageStatus: String, CaseIterable {
     case outdated = "Outdated"
     case inactive = "Inactive"
     case installed = "Installed"
-    case available = "Available"
     case updating = "Updating"
     
     var icon: String {
@@ -600,7 +585,6 @@ enum PackageStatus: String, CaseIterable {
         case .outdated: return "exclamationmark.triangle"
         case .inactive: return "archivebox"
         case .installed: return "checkmark.circle.fill"
-        case .available: return "plus.circle"
         case .updating: return "arrow.clockwise"
         }
     }
@@ -611,7 +595,6 @@ enum PackageStatus: String, CaseIterable {
         case .outdated: return .orange
         case .inactive: return .gray
         case .installed: return .green
-        case .available: return .secondary
         case .updating: return .purple
         }
     }
@@ -632,8 +615,7 @@ struct MacPortPackage: Identifiable, Equatable {
         if statuses.contains(.outdated) { return .outdated }
         if statuses.contains(.requested) { return .requested }
         if statuses.contains(.inactive) { return .inactive }
-        if statuses.contains(.installed) { return .installed }
-        return .available
+        return .installed
     }
 }
 
