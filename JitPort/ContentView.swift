@@ -237,7 +237,7 @@ struct ContentView: View {
                             }
                             .width(min: 220, ideal: 280, max: 350)
                             
-                            TableColumn("Version") { package in
+                            TableColumn("Version", value: \.version) { package in
                                 HStack(spacing: 4) {
                                     Text(package.version)
                                         .font(.system(.body, design: .monospaced))
@@ -259,7 +259,20 @@ struct ContentView: View {
                                     }
                                 }
                             }
-                            .width(min: 100, ideal: 130, max: 160)
+                            .width(min: 120, ideal: 150, max: 180)
+                            
+                            TableColumn("Inactive Version(s)") { package in
+                                HStack(spacing: 6) {
+                                    if !package.inactiveVersions.isEmpty {
+                                        Text(package.inactiveVersions.joined(separator: ", "))
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text("—")
+                                    }
+                                }
+                            }
+                            .width(min: 150, ideal: 180, max: 200)
                             
                             TableColumn("Category", value: \.description) { package in
                                 Text(package.description)
