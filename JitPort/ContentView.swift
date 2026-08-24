@@ -237,8 +237,9 @@ struct ContentView: View {
                             }
                             .width(min: 220, ideal: 280, max: 350)
                             
-                            TableColumn("Version", value: \.version) { package in
+                            TableColumn("Version") { package in
                                 HStack(spacing: 4) {
+                                    // In Inactive list, version refers to the inactive version being shown
                                     Text(package.version)
                                         .font(.system(.body, design: .monospaced))
                                         .foregroundStyle(.primary)
@@ -248,12 +249,14 @@ struct ContentView: View {
                             
                             TableColumn("Active") { package in
                                 HStack(spacing: 6) {
-                                    if let active = package.activeVersion, compareVersions(package.version, active) == .orderedAscending {
+                                    if let active = package.activeVersion {
                                         Text(active)
                                             .font(.caption.monospaced())
-                                            .foregroundStyle(.green)
+                                            .foregroundStyle(compareVersions(package.version, active) == .orderedAscending ? .green : .secondary)
                                     } else {
                                         Text("—")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
                                     }
                                 }
                             }
@@ -400,7 +403,7 @@ struct ContentView: View {
             let requested = try await runPortCommand("installed", "requested")
             let requestedNames = Set(self.parseInstalled(requested).keys)
             
-            // Fetch inactive packages to get their category info AND determine inactive status
+            // Fetch inactive packages names and categories only
             let inactive = try await runPortCommand("list", "inactive")
             let inactiveDict = parseList(inactive)
             let inactiveNames = Set(inactiveDict.keys)
@@ -411,66 +414,58 @@ struct ContentView: View {
             
             var newPackages: [MacPortPackage] = []
             
-            // Add installed packages
-            for (name, info) in installedDict {
+            // Get all installed package names
+            let allInstalledNames = Set(installedDict.keys)
+            
+            // We need to fetch versions for all inactive packages individually
+            let inactivePackagesData = try await withTaskGroup(of: (String, String?, [String]).self) { group in
+                for name in inactiveNames {
+                    group.addTask {
+                        let versions = await self.fetchPackageVersions(for: name)
+                        return (name, versions.active, versions.inactive)
+                    }
+                }
+                
+                var map: [String: (String?, [String])] = [:]
+                for await (name, active, inactive) in group {
+                    map[name] = (active, inactive)
+                }
+                return map
+            }
+            
+            // Consolidate package data
+            for name in allInstalledNames {
                 var statuses = Set<PackageStatus>()
                 statuses.insert(.installed)
-                
                 if requestedNames.contains(name) { statuses.insert(.requested) }
                 if inactiveNames.contains(name) { statuses.insert(.inactive) }
                 if outdatedDict[name] != nil { statuses.insert(.outdated) }
+                
+                let isInactive = inactiveNames.contains(name)
+                let versions = inactivePackagesData[name] ?? (nil, [])
+                
+                // For solely inactive packages, use the inactive list
+                let inactiveVersions = isInactive ? versions.1 : []
                 
                 let latestVersion = outdatedDict[name]
                 
                 let category = inactiveNames.contains(name) ? inactiveDict[name]?.description : nil
                 
+                // If inactive, create separate MacPortPackage entries for each inactive version?
+                // For now, let's keep one entry per package and show all inactive versions
+                
                 newPackages.append(MacPortPackage(
                     name: name,
-                    version: info.version,
-                    activeVersion: info.active,
-                    inactiveVersions: [], // Will be populated for inactive
+                    version: installedDict[name]?.0 ?? "unknown", // Currently active version from installedDict
+                    activeVersion: versions.0,
+                    inactiveVersions: inactiveVersions,
                     latestVersion: latestVersion,
-                    variant: info.variant,
+                    variant: installedDict[name]?.1,
                     statuses: statuses,
                     description: category ?? "Installed via MacPorts",
                     category: category,
                     isInstalled: true
                 ))
-            }
-            
-            // Specifically fetch active versions for inactive packages as requested
-            let inactivePackages = newPackages.filter { $0.statuses.contains(.inactive) }
-            
-            await withTaskGroup(of: (String, (String?, [String])).self) { group in
-                for pkg in inactivePackages {
-                    group.addTask {
-                        let versions = await self.fetchPackageVersions(for: pkg.name)
-                        return (pkg.name, versions)
-                    }
-                }
-                
-                var versionsMap: [String: (String?, [String])] = [:]
-                for await (name, versions) in group {
-                    versionsMap[name] = versions
-                }
-                
-                // Update newPackages with active/inactive versions
-                for i in 0..<newPackages.count {
-                    if let versions = versionsMap[newPackages[i].name] {
-                        newPackages[i] = MacPortPackage(
-                            name: newPackages[i].name,
-                            version: newPackages[i].version,
-                            activeVersion: versions.0,
-                            inactiveVersions: versions.1,
-                            latestVersion: newPackages[i].latestVersion,
-                            variant: newPackages[i].variant,
-                            statuses: newPackages[i].statuses,
-                            description: newPackages[i].description,
-                            category: newPackages[i].category,
-                            isInstalled: newPackages[i].isInstalled
-                        )
-                    }
-                }
             }
             
             packages = newPackages.sorted { $0.name < $1.name }
