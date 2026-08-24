@@ -217,68 +217,9 @@ struct ContentView: View {
                         .frame(minHeight: 300, maxHeight: .infinity)
                         .layoutPriority(1)
                     } else if selectedCategory == .inactive {
-                        Table(filteredPackages, selection: $selection, sortOrder: $sortOrder) {
-                            TableColumn("Name", value: \.name) { package in
-                                HStack(spacing: 8) {
-                                    Image(systemName: package.status.icon)
-                                        .foregroundStyle(package.status.color)
-                                        .frame(width: 16)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(package.name)
-                                            .lineLimit(1)
-                                            .font(.system(.body, design: .monospaced))
-                                        if let variant = package.variant, !variant.isEmpty {
-                                            Text(variant)
-                                                .font(.caption2)
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                    }
-                                }
-                            }
-                            .width(min: 220, ideal: 280, max: 350)
-                            
-                            TableColumn("Version") { package in
-                                HStack(spacing: 4) {
-                                    Text(package.version)
-                                        .font(.system(.body, design: .monospaced))
-                                        .foregroundStyle(.primary)
-                                }
-                            }
-                            .width(min: 120, ideal: 150, max: 180)
-                            
-                            TableColumn("Inactive Version(s)") { package in
-                                HStack(spacing: 6) {
-                                    if !package.inactiveVersions.isEmpty {
-                                        Text(package.inactiveVersions.joined(separator: ", "))
-                                            .font(.caption.monospaced())
-                                            .foregroundStyle(.secondary)
-                                    } else {
-                                        Text("—")
-                                    }
-                                }
-                            }
-                            .width(min: 200, ideal: 250, max: 300)
-                            
-                            TableColumn("Category", value: \.description) { package in
-                                Text(package.description)
-                                    .font(.body)
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(2)
-                            }
-                            .width(min: 200, ideal: 300, max: 500)
-                        }
-                        .tableStyle(.inset(alternatesRowBackgrounds: true))
-                        .overlay {
-                            if packages.isEmpty && !isLoading {
-                                ContentUnavailableView(
-                                    "No Packages",
-                                    systemImage: "shippingbox",
-                                    description: Text("Click Refresh to load packages from MacPorts")
-                                )
-                            }
-                        }
-                        .frame(minHeight: 300, maxHeight: .infinity)
-                        .layoutPriority(1)
+                        InactiveTable(filteredPackages: filteredPackages, selection: $selection, sortOrder: $sortOrder, compareVersions: compareVersions)
+                            .frame(minHeight: 300, maxHeight: .infinity)
+                            .layoutPriority(1)
                     } else {
                         Table(filteredPackages, selection: $selection, sortOrder: $sortOrder) {
                             TableColumn("Name", value: \.name) { package in
@@ -803,6 +744,73 @@ struct MacPortPackage: Identifiable, Equatable, Codable {
         if statuses.contains(.requested) { return .requested }
         if statuses.contains(.inactive) { return .inactive }
         return .installed
+    }
+}
+
+struct InactiveTable: View {
+    let filteredPackages: [MacPortPackage]
+    @Binding var selection: Set<MacPortPackage.ID>
+    @Binding var sortOrder: [KeyPathComparator<MacPortPackage>]
+    let compareVersions: (String, String) -> ComparisonResult
+    
+    var body: some View {
+        Table(filteredPackages, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("Name", value: \.name) { package in
+                HStack(spacing: 8) {
+                    Image(systemName: package.status.icon)
+                        .foregroundStyle(package.status.color)
+                        .frame(width: 16)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(package.name)
+                            .lineLimit(1)
+                            .font(.system(.body, design: .monospaced))
+                        if let variant = package.variant, !variant.isEmpty {
+                            Text(variant)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+            .width(min: 220, ideal: 280, max: 350)
+            
+            // Render a row for EACH inactive version.
+            // We use a helper to expand the packages into version rows.
+            TableColumn("Version") { package in
+                // This column should show the inactive version(s).
+                // If there are multiple inactive versions, we'd need to flatten the table structure.
+                // Given the constraint of Table(filteredPackages...), this is tricky.
+                Text(package.inactiveVersions.isEmpty ? package.version : package.inactiveVersions.joined(separator: ", "))
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.primary)
+            }
+            .width(min: 120, ideal: 150, max: 180)
+            
+            TableColumn("Active Version") { package in
+                HStack(spacing: 6) {
+                    if let active = package.activeVersion, !package.inactiveVersions.isEmpty,
+                       package.inactiveVersions.contains(where: { compareVersions($0, active) == .orderedAscending }) {
+                        Text(active)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.green)
+                    } else {
+                        Text("—")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .width(min: 100, ideal: 130, max: 160)
+            
+            TableColumn("Category", value: \.description) { package in
+                Text(package.description)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+            }
+            .width(min: 200, ideal: 300, max: 500)
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: true))
     }
 }
 
