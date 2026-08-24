@@ -237,33 +237,29 @@ struct ContentView: View {
                             }
                             .width(min: 220, ideal: 280, max: 350)
                             
-                            TableColumn("Active Version") { package in
+                            TableColumn("Version") { package in
                                 HStack(spacing: 4) {
-                                    if let active = package.activeVersion {
-                                        Text(active)
-                                            .font(.system(.body, design: .monospaced))
-                                            .foregroundStyle(.primary)
-                                    } else {
-                                        Text("—")
-                                            .font(.system(.body, design: .monospaced))
-                                            .foregroundStyle(.secondary)
-                                    }
+                                    Text(package.version)
+                                        .font(.system(.body, design: .monospaced))
+                                        .foregroundStyle(.primary)
                                 }
                             }
                             .width(min: 120, ideal: 150, max: 180)
                             
-                            TableColumn("Inactive Version(s)") { package in
+                            TableColumn("Active Version") { package in
                                 HStack(spacing: 6) {
-                                    if !package.inactiveVersions.isEmpty {
-                                        Text(package.inactiveVersions.joined(separator: ", "))
+                                    if let active = package.activeVersion, compareVersions(package.version, active) == .orderedAscending {
+                                        Text(active)
                                             .font(.caption.monospaced())
-                                            .foregroundStyle(.secondary)
+                                            .foregroundStyle(.green)
                                     } else {
                                         Text("—")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
                                     }
                                 }
                             }
-                            .width(min: 150, ideal: 180, max: 200)
+                            .width(min: 100, ideal: 130, max: 160)
                             
                             TableColumn("Category", value: \.description) { package in
                                 Text(package.description)
@@ -370,7 +366,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: {
-                        Task { await refreshPackages(sync: false) }
+                        Task { await refreshPackages() }
                     }) {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
@@ -378,12 +374,20 @@ struct ContentView: View {
                 }
             }
             .task {
-                await refreshPackages(sync: false)
+                await loadOrRefresh()
             }
         }
     }
     
-    private func refreshPackages(sync: Bool = false) async {
+    private func loadOrRefresh() async {
+        if let loaded = loadPackages() {
+            self.packages = loaded
+        } else {
+            await refreshPackages()
+        }
+    }
+    
+    private func refreshPackages() async {
         print("Starting package refresh...")
         isLoading = true
         errorMessage = nil
@@ -393,11 +397,6 @@ struct ContentView: View {
         }
         
         do {
-            if sync {
-                print("Syncing MacPorts database...")
-                _ = try await runRootCommandAsync("/opt/local/bin/port -s sync")
-            }
-            
             // Fetch installed packages (active + inactive)
             let installed = try await runPortCommand("installed")
             let installedDict = parseInstalled(installed)
@@ -480,12 +479,41 @@ struct ContentView: View {
             }
             
             packages = newPackages.sorted { $0.name < $1.name }
+            savePackages(packages)
             lastRefresh = Date()
         } catch {
             print("Error refreshing packages: \(error)")
             errorMessage = error.localizedDescription
             // Fall back to sample data for demo
             loadSampleData()
+        }
+    }
+    
+    // MARK: - Data Persistence
+    
+    private var storageURL: URL {
+        let paths = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        let supportDir = paths[0].appendingPathComponent("JitPort", isDirectory: true)
+        try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
+        return supportDir.appendingPathComponent("packages.json")
+    }
+    
+    private func savePackages(_ packages: [MacPortPackage]) {
+        do {
+            let data = try JSONEncoder().encode(packages)
+            try data.write(to: storageURL)
+        } catch {
+            print("Error saving packages: \(error)")
+        }
+    }
+    
+    private func loadPackages() -> [MacPortPackage]? {
+        do {
+            let data = try Data(contentsOf: storageURL)
+            return try JSONDecoder().decode([MacPortPackage].self, from: data)
+        } catch {
+            print("No saved packages found or error loading: \(error)")
+            return nil
         }
     }
     
@@ -497,21 +525,19 @@ struct ContentView: View {
             
             for line in output.components(separatedBy: .newlines) {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.isEmpty || !trimmed.contains("@") || trimmed.hasPrefix("The following") { continue }
+                if trimmed.isEmpty || trimmed.hasPrefix("The following") { continue }
                 
-                // Format: name @version ...
-                let parts = trimmed.components(separatedBy: "@")
-                if parts.count < 2 { continue }
-                
-                let versionPart = parts[1].trimmingCharacters(in: .whitespaces)
-                let components = versionPart.components(separatedBy: .whitespaces)
-                
-                let version = components[0]
-                
-                if versionPart.contains("(active)") {
-                    active = version
-                } else {
-                    inactive.append(version)
+                // Pattern: name @version (active) ... or name @version
+                let pattern = #/^\s*\S+\s+@(\S+)(?:\s+\((active)\))?/#
+                if let match = trimmed.firstMatch(of: pattern) {
+                    let version = String(match.output.1)
+                    let activeKeyword = match.output.2.map(String.init)
+                    
+                    if activeKeyword == "active" {
+                        active = version
+                    } else {
+                        inactive.append(version)
+                    }
                 }
             }
             return (active, inactive)
@@ -733,7 +759,7 @@ enum Category: String, CaseIterable, Identifiable {
     }
 }
 
-enum PackageStatus: String, CaseIterable {
+enum PackageStatus: String, Codable, CaseIterable {
     case requested = "Requested"
     case outdated = "Outdated"
     case inactive = "Inactive"
@@ -761,7 +787,7 @@ enum PackageStatus: String, CaseIterable {
     }
 }
 
-struct MacPortPackage: Identifiable, Equatable {
+struct MacPortPackage: Identifiable, Equatable, Codable {
     var id: String { name }
     let name: String
     let version: String
