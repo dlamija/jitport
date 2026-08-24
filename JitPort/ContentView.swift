@@ -237,33 +237,27 @@ struct ContentView: View {
                             }
                             .width(min: 220, ideal: 280, max: 350)
                             
-                            TableColumn("Version") { package in
+                            TableColumn("Version", value: \.version) { package in
                                 HStack(spacing: 4) {
-                                    if let active = package.activeVersion {
-                                        Text(active)
-                                            .font(.system(.body, design: .monospaced))
-                                            .foregroundStyle(.primary)
-                                    } else {
-                                        Text("—")
-                                            .font(.system(.body, design: .monospaced))
-                                            .foregroundStyle(.secondary)
-                                    }
+                                    Text(package.version)
+                                        .font(.system(.body, design: .monospaced))
+                                        .foregroundStyle(.primary)
                                 }
                             }
                             .width(min: 120, ideal: 150, max: 180)
                             
                             TableColumn("Active") { package in
                                 HStack(spacing: 6) {
-                                    if !package.inactiveVersions.isEmpty {
-                                        Text(package.inactiveVersions.joined(separator: ", "))
+                                    if let active = package.activeVersion, compareVersions(package.version, active) == .orderedAscending {
+                                        Text(active)
                                             .font(.caption.monospaced())
-                                            .foregroundStyle(.secondary)
+                                            .foregroundStyle(.green)
                                     } else {
                                         Text("—")
                                     }
                                 }
                             }
-                            .width(min: 150, ideal: 180, max: 200)
+                            .width(min: 100, ideal: 130, max: 160)
                             
                             TableColumn("Category", value: \.description) { package in
                                 Text(package.description)
